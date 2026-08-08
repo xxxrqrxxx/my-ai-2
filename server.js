@@ -38,8 +38,8 @@ app.get('/api/db-check', async (req, res) => {
 app.use('/api/sessions', require('./routes/sessions'));
 app.use('/api/messages', require('./routes/messages'));
 app.use('/api/chat', require('./routes/chat'));
-app.use('/api/memories', require('./routes/memories'));   // 新增：记忆管理
-app.use('/api/settings', require('./routes/settings'));   // 新增：设置管理
+//app.use('/api/memories', require('./routes/memories'));   // 新增：记忆管理
+//app.use('/api/settings', require('./routes/settings'));   // 新增：设置管理
 
 const PORT = process.env.PORT || 3000;
 console.log('🔍 SUPABASE_URL 是否存在:', !!process.env.SUPABASE_URL);
