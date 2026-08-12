@@ -1,177 +1,169 @@
-// backend/routes/memories.js
-// 记忆管理 API - 增删改查
-
+// routes/memories.js - 记忆管理 API
 const express = require('express');
 const router = express.Router();
-const supabase = require('../db');
+const ombre = require('../ombreBrain');
 
-/**
- * GET /api/memories
- * 获取所有记忆
- */
+// 获取所有记忆
 router.get('/', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('memories')
-      .select('*')
-      .order('timestamp', { ascending: false });
-
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-
-    // 格式化返回数据，兼容前端
-    const formatted = (data || []).map(m => ({
-      id: m.id,
-      title: m.title || '对话摘要',
-      text: m.summary,           // 前端用 text，数据库用 summary
-      tag: m.tag || '日常',
-      source: m.source || 'auto',
-      model_used: m.model_used,
-      time: formatTime(m.timestamp),
-      timestamp: m.timestamp
-    }));
-
-    res.json(formatted);
+    const { category, search, limit } = req.query;
+    const memories = await ombre.getAll({ category, search, limit: limit ? parseInt(limit) : 100 });
+    res.json(memories);
   } catch (err) {
-    console.error('❌ 获取记忆失败:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-/**
- * POST /api/memories
- * 手动添加记忆
- * Body: { title, text, tag }
- */
+// 记忆浮现（根据上下文召回）
+router.post('/breath', async (req, res) => {
+  try {
+    const { query, limit, category } = req.body;
+    const memories = await ombre.breath(query || '', limit || 5, category);
+    // 访问时增加脉冲
+    memories.forEach(m => ombre.pulse(m.id));
+    res.json(memories);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 新建记忆
 router.post('/', async (req, res) => {
   try {
-    const { title, text, tag = '日常' } = req.body;
-
-    if (!text || !text.trim()) {
-      return res.status(400).json({ error: '记忆内容不能为空' });
-    }
-
-    const { data, error } = await supabase
-      .from('memories')
-      .insert({
-        title: title || '手动记录',
-        summary: text.trim(),
-        tag: tag,
-        source: 'user',  // 手动添加的标记为 user
-        model_used: null
-      })
-      .select()
-      .single();
-
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-
-    const formatted = {
-      id: data.id,
-      title: data.title,
-      text: data.summary,
-      tag: data.tag,
-      source: data.source,
-      model_used: data.model_used,
-      time: formatTime(data.timestamp),
-      timestamp: data.timestamp
-    };
-
-    res.json(formatted);
+    const { title, content, category, importance, emotional_valence, keywords, domain_tags, source } = req.body;
+    if (!title) return res.status(400).json({ error: '标题不能为空' });
+    const memory = await ombre.hold({
+      title,
+      content: content || '',
+      category: category || '日常',
+      importance: importance || 3,
+      emotional_valence: emotional_valence || 'neutral',
+      keywords: keywords || [],
+      domain_tags: domain_tags || [],
+      source: source || 'manual',
+    });
+    res.json(memory);
   } catch (err) {
-    console.error('❌ 添加记忆失败:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-/**
- * PATCH /api/memories/:id
- * 更新记忆
- * Body: { title, text, tag }
- */
+// 更新记忆
 router.patch('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, text, tag } = req.body;
-
-    const updateData = {};
-    if (title !== undefined) updateData.title = title;
-    if (text !== undefined) updateData.summary = text;
-    if (tag !== undefined) updateData.tag = tag;
-
-    if (Object.keys(updateData).length === 0) {
-      return res.status(400).json({ error: '没有要更新的字段' });
-    }
-
-    const { data, error } = await supabase
-      .from('memories')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-
-    const formatted = {
-      id: data.id,
-      title: data.title,
-      text: data.summary,
-      tag: data.tag,
-      source: data.source,
-      model_used: data.model_used,
-      time: formatTime(data.timestamp),
-      timestamp: data.timestamp
-    };
-
-    res.json(formatted);
+    const memory = await ombre.update(parseInt(id), req.body);
+    res.json(memory);
   } catch (err) {
-    console.error('❌ 更新记忆失败:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-/**
- * DELETE /api/memories/:id
- * 删除记忆
- */
+// 遗忘记忆（软删除）
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-
-    const { error } = await supabase
-      .from('memories')
-      .delete()
-      .eq('id', id);
-
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-
+    await ombre.forget(parseInt(id));
     res.json({ success: true });
   } catch (err) {
-    console.error('❌ 删除记忆失败:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-/**
- * 格式化时间为 "X月X日更新" 格式
- */
-function formatTime(timestamp) {
-  if (!timestamp) return '';
-  const date = new Date(timestamp);
-  const now = new Date();
-  const diffDays = Math.floor((now - date) / (1000 * 60 * 60 * 24));
+// 彻底删除
+router.delete('/:id/purge', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await ombre.purge(parseInt(id));
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-  if (diffDays === 0) return '今天更新';
-  if (diffDays === 1) return '昨天更新';
-  if (diffDays < 7) return `${diffDays}天前更新`;
+// 恢复记忆
+router.post('/:id/restore', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const memory = await ombre.restore(parseInt(id));
+    res.json(memory);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-  return `${date.getMonth() + 1}月${date.getDate()}日更新`;
-}
+// 锚定记忆（标记重要）
+router.post('/:id/anchor', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { importance } = req.body;
+    const memory = await ombre.anchor(parseInt(id), importance || 5);
+    res.json(memory);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 释放记忆（降低权重）
+router.post('/:id/release', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const memory = await ombre.release(parseInt(id));
+    res.json(memory);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 追溯记忆来源
+router.get('/:id/trace', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const trace = await ombre.trace(parseInt(id));
+    res.json(trace);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 记忆成长（定期整理，后台调用）
+router.post('/grow', async (req, res) => {
+  try {
+    const result = await ombre.grow();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取自我认知
+router.get('/identity/list', async (req, res) => {
+  try {
+    const identity = await ombre.getIdentity();
+    res.json(identity);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取计划
+router.get('/plan/list', async (req, res) => {
+  try {
+    const plans = await ombre.getPlans();
+    res.json(plans);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取信件
+router.get('/letter/list', async (req, res) => {
+  try {
+    const letters = await ombre.getLetters();
+    res.json(letters);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 module.exports = router;

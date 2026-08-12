@@ -1,163 +1,204 @@
-// backend/memory.js
-// 记忆压缩模块 - 用千问做压缩，全局共享一份记忆
-
-const supabase = require('./db');
-const { askAI } = require('./ai');
+// memory.js - 记忆压缩模块（集成 Ombre Brain）
+const { supabase } = require('./db');
+const ombre = require('./ombreBrain');
+const ai = require('./ai');
 
 /**
- * 估算文本的 token 数
- * 中文大概 1.5 字符 = 1 token，英文大概 4 字符 = 1 token
- * 这里取保守值 1.5，宁可多算一点也不要少算
+ * 加载所有记忆（给 AI 当上下文）
+ */
+async function loadMemory() {
+  try {
+    const memories = await ombre.getAll({ limit: 200 });
+    if (memories.length === 0) return '';
+    
+    // 按重要性和脉冲排序，格式化成文本
+    const sorted = memories
+      .sort((a, b) => (b.importance * 2 + b.pulse) - (a.importance * 2 + a.pulse))
+      .slice(0, 50); // 最多取50条
+    
+    return ombre.formatForPrompt(sorted);
+  } catch (err) {
+    console.error('[loadMemory] 错误:', err.message);
+    return '';
+  }
+}
+
+/**
+ * 估算 token 数（简单估算：中文1字≈1.5 token，英文1词≈1.3 token）
  */
 function estimateTokens(text) {
   if (!text) return 0;
-  return Math.ceil(text.length / 1.5);
+  const chinese = (text.match(/[\u4e00-\u9fa5]/g) || []).length;
+  const english = (text.match(/[a-zA-Z]+/g) || []).length;
+  return Math.floor(chinese * 1.5 + english * 1.3);
 }
 
 /**
- * 加载所有记忆，拼接成一段文本
- * 全局共享，所有会话共用同一份记忆
- */
-async function loadMemory() {
-  const { data, error } = await supabase
-    .from('memories')
-    .select('*')
-    .order('timestamp', { ascending: true });
-
-  if (error) {
-    console.error('❌ 加载记忆失败:', error.message);
-    return '';
-  }
-
-  if (!data || data.length === 0) return '';
-
-  // 拼接所有记忆，每条标明来源和标题
-  const memoryLines = data.map(m => {
-    const sourceLabel = m.source === 'user' ? '手动记录' : `自动摘要(${m.model_used || 'AI'})`;
-    return `[${sourceLabel}] ${m.title || '记忆'}: ${m.summary}`;
-  });
-
-  return memoryLines.join('\n');
-}
-
-/**
- * 检查是否需要压缩，如果需要就执行压缩
- * @param {number} sessionId - 会话 ID
- * @param {object} settings - 设置对象
+ * 检查是否需要压缩，需要的话就压缩
  */
 async function compressIfNeeded(sessionId, settings) {
   try {
-    // 1. 获取当前会话所有可见消息
-    const { data: messages, error: msgError } = await supabase
+    const threshold = settings.compress_threshold || 6000;
+    const keepRounds = settings.keep_rounds || 6;
+    const compressModel = settings.compress_model || 'gemini-2.0-flash';
+
+    // 获取该会话所有可见消息
+    const { data: messages, error } = await supabase
       .from('messages')
       .select('*')
       .eq('session_id', sessionId)
       .eq('visible', true)
       .order('created_at', { ascending: true });
 
-    if (msgError) {
-      console.error('❌ 获取消息失败:', msgError.message);
-      return;
-    }
+    if (error) throw error;
+    if (!messages || messages.length < keepRounds * 2 + 2) return { compressed: false };
 
-    if (!messages || messages.length === 0) return;
+    // 估算总 token
+    const totalTokens = messages.reduce((sum, m) => sum + (m.tokens || estimateTokens(m.content)), 0);
+    if (totalTokens < threshold) return { compressed: false };
 
-    // 2. 计算总 token 数
-    const totalTokens = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
-    const threshold = settings.compress_threshold || 6000;
-
-    console.log(`📊 当前会话 token: ${totalTokens} / 阈值: ${threshold}`);
-
-    if (totalTokens < threshold) {
-      console.log('✅ 未达到压缩阈值，跳过');
-      return;
-    }
-
-    // 3. 计算要保留的最近 N 轮（一轮 = 用户 + AI 两条消息）
-    const keepRounds = settings.compress_keep_rounds || 6;
-    const keepCount = keepRounds * 2; // 每轮两条消息
-
-    if (messages.length <= keepCount) {
-      console.log('ℹ️ 消息太少，不需要压缩');
-      return;
-    }
-
-    // 4. 取出要压缩的消息（前面的部分）
+    // 保留最近 N 轮，前面的压缩
+    const keepCount = keepRounds * 2; // 每轮 user+assistant
     const toCompress = messages.slice(0, messages.length - keepCount);
-    const keepMessages = messages.slice(messages.length - keepCount);
+    const toKeep = messages.slice(messages.length - keepCount);
 
-    console.log(`🗜️ 开始压缩: ${toCompress.length} 条消息 → 压缩为摘要，保留最近 ${keepRounds} 轮`);
+    if (toCompress.length < 4) return { compressed: false };
 
-    // 5. 组装对话文本
-    const conversationText = toCompress
-      .map(m => `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`)
-      .join('\n');
+    // 组装要压缩的对话文本
+    const conversationText = toCompress.map(m => {
+      const role = m.role === 'user' ? 'Nana' : 'Arden';
+      return `${role}: ${m.content}`;
+    }).join('\n\n');
 
-    // 6. 用 AI 压缩（默认用千问）
-    const compressModel = settings.compress_model || 'qwen-plus';
-    const summary = await askAI({
-      model: compressModel,
-      systemPrompt: '你是一个对话摘要助手。请将以下对话内容压缩为一段简洁的摘要，保留关键事实、情感基调和重要细节。用中文输出，不要超过300字。只输出摘要内容，不要加任何解释。',
-      messages: [{ role: 'user', content: conversationText }],
-      maxTokens: 500,
-      temperature: 0.3
-    });
+    // 调用 AI 生成摘要
+    const summaryPrompt = `请把下面这段对话压缩成几条关键记忆摘要，每条一行，格式为"[分类] 标题: 内容"。
+分类可选：日常、重要、喜好、情绪。
+只输出记忆条目，不要其他解释。
 
-    // 7. 生成标题（用 AI 生成一个简短标题）
-    let title = '对话摘要';
+对话：
+${conversationText}`;
+
+    let summaryText = '';
     try {
-      const titleResult = await askAI({
+      summaryText = await ai.generate({
         model: compressModel,
-        systemPrompt: '请为以下对话摘要生成一个不超过10个字的简短标题，概括核心内容。只输出标题，不要加任何标点或解释。',
-        messages: [{ role: 'user', content: summary }],
-        maxTokens: 50,
-        temperature: 0.3
+        systemPrompt: '你是一个记忆整理助手，擅长从对话中提取关键信息。',
+        messages: [{ role: 'user', content: summaryPrompt }],
+        maxTokens: 1500,
+        temperature: 0.3,
       });
-      if (titleResult && titleResult.trim()) {
-        title = titleResult.trim().replace(/[。！？、，.]/g, '').slice(0, 15);
+    } catch (aiErr) {
+      console.error('[compress] AI 生成摘要失败:', aiErr.message);
+      // 降级：用简单摘要
+      summaryText = `[日常] 对话摘要: ${conversationText.slice(0, 200)}...`;
+    }
+
+    // 解析摘要，逐条存入 Ombre Brain
+    const summaryLines = summaryText.split('\n').filter(line => line.trim());
+    let savedCount = 0;
+    
+    for (const line of summaryLines) {
+      // 尝试解析 "[分类] 标题: 内容" 格式
+      const match = line.match(/\[(.+?)\]\s*(.+?)[:：]\s*(.+)/);
+      if (match) {
+        const [, category, title, content] = match;
+        await ombre.hold({
+          title: title.trim(),
+          content: content.trim(),
+          category: ['日常', '重要', '喜好', '情绪'].includes(category.trim()) ? category.trim() : '日常',
+          importance: category.trim() === '重要' ? 4 : 3,
+          source: 'compress',
+          trace: `session:${sessionId}`,
+          model_used: compressModel,
+        });
+        savedCount++;
+      } else if (line.trim()) {
+        // 解析失败就整条存
+        await ombre.hold({
+          title: '对话摘要',
+          content: line.trim(),
+          category: '自动压缩',
+          importance: 2,
+          source: 'compress',
+          trace: `session:${sessionId}`,
+          model_used: compressModel,
+        });
+        savedCount++;
       }
-    } catch (titleErr) {
-      console.warn('⚠️ 生成标题失败，使用默认标题');
     }
 
-    // 8. 保存摘要到 memories 表
-    const { error: insertError } = await supabase
-      .from('memories')
-      .insert({
-        summary: summary,
-        title: title,
-        tag: '日常',
-        source: 'auto',
-        model_used: compressModel,
-        conversation_id: String(sessionId)
-      });
-
-    if (insertError) {
-      console.error('❌ 保存记忆摘要失败:', insertError.message);
-      return;
-    }
-
-    // 9. 将被压缩的消息标记为不可见
-    const idsToHide = toCompress.map(m => m.id);
-    const { error: updateError } = await supabase
+    // 把旧消息标记为不可见
+    const toCompressIds = toCompress.map(m => m.id);
+    await supabase
       .from('messages')
       .update({ visible: false })
-      .in('id', idsToHide);
+      .in('id', toCompressIds);
 
-    if (updateError) {
-      console.error('❌ 隐藏旧消息失败:', updateError.message);
-      return;
-    }
-
-    console.log(`✅ 压缩完成！生成摘要: "${title}"，隐藏了 ${idsToHide.length} 条旧消息`);
-
+    console.log(`[compress] 会话 ${sessionId} 压缩完成，生成 ${savedCount} 条记忆，隐藏 ${toCompressIds.length} 条旧消息`);
+    return { compressed: true, savedCount, hiddenCount: toCompressIds.length };
   } catch (err) {
-    console.error('❌ 记忆压缩失败:', err.message);
+    console.error('[compressIfNeeded] 错误:', err.message);
+    return { compressed: false, error: err.message };
+  }
+}
+
+/**
+ * 生成会话标题
+ */
+async function generateTitle(sessionId, firstMessage) {
+  try {
+    const settings = await getSettings();
+    const compressModel = settings?.compress_model || 'gemini-2.0-flash';
+    
+    const title = await ai.generate({
+      model: compressModel,
+      systemPrompt: '你是一个标题生成助手，用简短的中文（不超过10字）概括对话主题。',
+      messages: [{ role: 'user', content: `给这段对话起个标题：${firstMessage}` }],
+      maxTokens: 50,
+      temperature: 0.5,
+    });
+
+    const cleanTitle = title.replace(/[""''《》]/g, '').slice(0, 20);
+    
+    await supabase
+      .from('sessions')
+      .update({ title: cleanTitle })
+      .eq('id', sessionId);
+
+    return cleanTitle;
+  } catch (err) {
+    console.error('[generateTitle] 错误:', err.message);
+    return '新对话';
+  }
+}
+
+/**
+ * 获取设置
+ */
+async function getSettings() {
+  try {
+    const { data, error } = await supabase
+      .from('settings')
+      .select('*')
+      .eq('id', 1)
+      .single();
+    if (error) throw error;
+    return data;
+  } catch (err) {
+    console.error('[getSettings] 错误:', err.message);
+    return {
+      model: 'gemini-2.0-flash',
+      compress_model: 'gemini-2.0-flash',
+      compress_threshold: 6000,
+      keep_rounds: 6,
+    };
   }
 }
 
 module.exports = {
-  estimateTokens,
   loadMemory,
-  compressIfNeeded
+  compressIfNeeded,
+  generateTitle,
+  getSettings,
+  estimateTokens,
 };
