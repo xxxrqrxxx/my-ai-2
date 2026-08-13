@@ -3,23 +3,22 @@ const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 
 const AI_MODELS = {
-  'gemini-2.5-flash': {
-    name: 'gemini-2.5-flash',
-    maxTokens: 8192,
-  },
-  'gemini-2.5-pro': {
-    name: 'gemini-2.5-pro',
-    maxTokens: 8192,
-  },
-  // 兼容旧模型名，自动映射到2.5
-  'gemini-1.5-flash': { name: 'gemini-2.5-flash', maxTokens: 8192 },
-  'gemini-1.5-pro': { name: 'gemini-2.5-pro', maxTokens: 8192 },
-  'gemini-2.0-flash': { name: 'gemini-2.5-flash', maxTokens: 8192 },
-  'gemini-2.0-pro': { name: 'gemini-2.5-pro', maxTokens: 8192 },
+  'gemini-3.5-flash': { name: 'gemini-3.5-flash', maxTokens: 8192 },
+  'gemini-3.5-flash-lite': { name: 'gemini-3.5-flash-lite', maxTokens: 8192 },
+  'gemini-3.1-flash-lite': { name: 'gemini-3.1-flash-lite', maxTokens: 8192 },
+  // 兼容旧名，全部映射到3.5-flash
+  'gemini-3-flash': { name: 'gemini-3.5-flash', maxTokens: 8192 },
+  'gemini-3-pro': { name: 'gemini-3.5-flash', maxTokens: 8192 },
+  'gemini-2.5-flash': { name: 'gemini-3.5-flash', maxTokens: 8192 },
+  'gemini-2.5-pro': { name: 'gemini-3.5-flash', maxTokens: 8192 },
+  'gemini-1.5-flash': { name: 'gemini-3.5-flash', maxTokens: 8192 },
+  'gemini-1.5-pro': { name: 'gemini-3.5-flash', maxTokens: 8192 },
+  'gemini-2.0-flash': { name: 'gemini-3.5-flash', maxTokens: 8192 },
+  'gemini-2.0-pro': { name: 'gemini-3.5-flash', maxTokens: 8192 },
 };
 
 async function generate({ model, systemPrompt, messages, maxTokens, temperature, topP }) {
-  const modelConfig = AI_MODELS[model] || AI_MODELS['gemini-2.5-flash'];
+  const modelConfig = AI_MODELS[model] || AI_MODELS['gemini-3.5-flash'];
   
   if (!GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY 未设置');
@@ -66,7 +65,7 @@ async function generate({ model, systemPrompt, messages, maxTokens, temperature,
 }
 
 async function generateStream({ model, systemPrompt, messages, maxTokens, temperature, topP }, onChunk) {
-  const modelConfig = AI_MODELS[model] || AI_MODELS['gemini-2.5-flash'];
+  const modelConfig = AI_MODELS[model] || AI_MODELS['gemini-3.5-flash'];
   
   if (!GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY 未设置');
