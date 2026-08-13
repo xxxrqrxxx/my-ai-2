@@ -3,7 +3,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../db');
-const { askAI } = require('../ai');
+const { generate: askAI } = require('../ai');
 const { compressIfNeeded, outputFeedback, estimateTokens } = require('../memory');
 const ombre = require('../ombreBrain');
 
