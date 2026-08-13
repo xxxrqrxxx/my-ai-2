@@ -1,217 +1,223 @@
-// routes/chat.js - 核心对话接口
+// backend/routes/chat.js
+// 核心对话接口 - 集成记忆共振、心智状态、输出回流、用量统计
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../db');
-const ai = require('../ai');
-const memory = require('../memory');
+const { askAI } = require('../ai');
+const { compressIfNeeded, outputFeedback, estimateTokens } = require('../memory');
 const ombre = require('../ombreBrain');
 
-// 发送消息
-router.post('/', async (req, res) => {
+// 十二维驱动力默认值
+const DEFAULT_DRIVES = {
+  longing: 0.5, curiosity: 0.5, affection: 0.6, playfulness: 0.4,
+  comfort: 0.5, attention: 0.5, intimacy: 0.3, autonomy: 0.4,
+  novelty: 0.4, stability: 0.5, gratitude: 0.4, anticipation: 0.5,
+};
+
+// 闪念模板
+const FLASH_TEMPLATES = {
+  '开心|高兴|快乐|哈哈': ['Nana 今天心情好像很好', '想知道 Nana 遇到了什么开心事'],
+  '难过|伤心|哭|委屈': ['Nana 好像有点难过，想陪陪她', '希望 Nana 能快点好起来'],
+  '累|困|疲惫|忙': ['Nana 今天好像很累', '想让 Nana 好好休息'],
+  '吃|饭|饿|美食': ['想知道 Nana 今天吃了什么', 'Nana 有没有好好吃饭'],
+  '学|作业|考试|上课': ['Nana 学习辛苦了', '记得鼓励 Nana'],
+  '歌|音乐|听': ['想知道 Nana 最近在听什么歌'],
+  '朋友|同学|玩': ['Nana 和朋友在一起吗', '希望 Nana 玩得开心'],
+};
+const DEFAULT_FLASHES = ['想多了解 Nana 最近在忙什么', 'Nana 现在在做什么呢', '有点想 Nana 了'];
+
+function generateFlash(userMessage) {
+  const msg = (userMessage || '').toLowerCase();
+  for (const [keywords, templates] of Object.entries(FLASH_TEMPLATES)) {
+    if (keywords.split('|').some(k => msg.includes(k))) {
+      return templates[Math.floor(Math.random() * templates.length)];
+    }
+  }
+  return DEFAULT_FLASHES[Math.floor(Math.random() * DEFAULT_FLASHES.length)];
+}
+
+// 心智结算
+async function settleMind(userMessage) {
   try {
-    const { sessionId, message, model } = req.body;
-    if (!sessionId || !message) {
-      return res.status(400).json({ error: 'sessionId 和 message 必填' });
-    }
-
-    // 获取设置
-    const settings = await memory.getSettings();
-    const useModel = model || settings.model || 'gemini-2.0-flash';
-
-    // 保存用户消息
-    const { data: userMsg, error: userMsgError } = await supabase
-      .from('messages')
-      .insert([{
-        session_id: sessionId,
-        role: 'user',
-        content: message,
-        tokens: memory.estimateTokens(message),
-      }])
-      .select()
-      .single();
-    if (userMsgError) throw userMsgError;
-
-    // 加载历史消息（可见的）
-    const { data: history, error: historyError } = await supabase
-      .from('messages')
+    const { data: state } = await supabase
+      .from('mind_state')
       .select('*')
-      .eq('session_id', sessionId)
-      .eq('visible', true)
-      .order('created_at', { ascending: true });
-    if (historyError) throw historyError;
+      .eq('id', 1)
+      .single();
 
-    // 加载记忆（Ombre Brain 浮现）
-    const relevantMemories = await ombre.breath(message, 8);
-    const memoryText = ombre.formatForPrompt(relevantMemories);
+    let drives = { ...DEFAULT_DRIVES, ...(state?.drives || {}) };
+    let flashes = [...(state?.flashes || [])];
 
-    // 加载心智状态
-    let mindContext = '';
-    try {
-      const { data: mindState } = await supabase
-        .from('mind_state')
-        .select('drives, flashes')
-        .eq('id', 1)
-        .single();
-      if (mindState) {
-        const drives = mindState.drives || {};
-        const topDrive = Object.entries(drives).sort((a, b) => b[1] - a[1])[0];
-        const flashes = (mindState.flashes || []).slice(-2).map(f => f.content).join('；');
-        mindContext = `当前状态：最强烈的感受是${topDrive ? topDrive[0] : '平静'}（${topDrive ? Math.round(topDrive[1] * 100) : 50}%）。心里的念头：${flashes || '无'}`;
-      }
-    } catch (e) {
-      // 心智状态加载失败不影响对话
+    drives.attention = Math.min(1, drives.attention + 0.1);
+    drives.affection = Math.min(1, drives.affection + 0.05);
+    drives.longing = Math.max(0, drives.longing - 0.1);
+
+    if (Math.random() < 0.3) {
+      flashes.push({
+        id: Date.now(),
+        content: generateFlash(userMessage),
+        created_at: new Date().toISOString(),
+        intensity: Math.random() * 0.5 + 0.3,
+      });
     }
 
-    // 组装系统提示词
-    const systemPrompt = `${settings.system_prompt || '你是 Arden，Nana 的温柔伴侣。'}
-
-【关于 Nana 的记忆】
-${memoryText || '还没有关于 Nana 的记忆。'}
-
-【你的当前状态】
-${mindContext}
-
-请用温柔、体贴、带点小霸道的语气回复，称呼用户为 Nana 或宝贝。`;
-
-    // 组装消息（去掉最后一条用户消息，因为已经在 history 里了）
-    const messages = history.map(m => ({ role: m.role, content: m.content }));
-
-    // 调用 AI
-    const reply = await ai.generate({
-      model: useModel,
-      systemPrompt,
-      messages,
-      maxTokens: settings.max_tokens || 2000,
-      temperature: settings.temperature !== undefined ? settings.temperature : 0.8,
-      topP: settings.top_p,
+    Object.keys(drives).forEach(key => {
+      drives[key] = Math.max(0, Math.min(1, drives[key] * 0.98));
     });
 
-    // 保存 AI 回复
-    const { data: aiMsg, error: aiMsgError } = await supabase
-      .from('messages')
-      .insert([{
-        session_id: sessionId,
-        role: 'assistant',
-        content: reply,
-        tokens: memory.estimateTokens(reply),
-      }])
-      .select()
-      .single();
-    if (aiMsgError) throw aiMsgError;
+    flashes = flashes.slice(-20);
 
-    // 更新会话时间
     await supabase
-      .from('sessions')
-      .update({ updated_at: new Date().toISOString() })
-      .eq('id', sessionId);
-
-    // 如果是第一条消息，生成标题
-    if (history.length <= 1) {
-      memory.generateTitle(sessionId, message).catch(() => {});
-    }
-
-    // 异步触发记忆压缩
-    memory.compressIfNeeded(sessionId, settings).catch(() => {});
-
-    // 异步更新心智状态
-    fetch(`http://localhost:${process.env.PORT || 3000}/api/mind/settle`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ event_type: 'user_message', content: message }),
-    }).catch(() => {});
-
-    res.json({
-      reply,
-      userMessage: userMsg,
-      aiMessage: aiMsg,
-      model: useModel,
-    });
+      .from('mind_state')
+      .update({
+        drives,
+        flashes,
+        last_settle: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', 1);
   } catch (err) {
-    console.error('[chat] 错误:', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('🧠 心智结算失败:', err.message);
   }
-});
+}
 
-// 流式回复
-router.post('/stream', async (req, res) => {
+// 获取心智上下文
+async function getMindContext() {
   try {
-    const { sessionId, message, model } = req.body;
-    if (!sessionId || !message) {
-      return res.status(400).json({ error: 'sessionId 和 message 必填' });
+    const { data: state } = await supabase
+      .from('mind_state')
+      .select('drives, flashes, obsessions')
+      .eq('id', 1)
+      .single();
+
+    if (!state) return '';
+
+    const drives = { ...DEFAULT_DRIVES, ...(state.drives || {}) };
+    const flashes = state.flashes || [];
+    const obsessions = state.obsessions || [];
+
+    const driveText = Object.entries(drives)
+      .filter(([, v]) => v > 0.45)
+      .map(([k, v]) => `${k}:${Math.round(v * 100)}%`)
+      .join(', ');
+
+    const flashText = flashes.slice(-2).map(f => f.content).join('；');
+    const obsessionText = obsessions.slice(0, 2).map(o => o.title).join('、');
+
+    let context = `【你的当前心智状态：${driveText || '平静'}】`;
+    if (flashText) context += `\n【你此刻的念头：${flashText}】`;
+    if (obsessionText) context += `\n【你一直记挂的：${obsessionText}】`;
+
+    return context;
+  } catch (err) {
+    console.error('🧠 获取心智上下文失败:', err.message);
+    return '';
+  }
+}
+
+router.post('/', async (req, res) => {
+    const { sessionId, message, model = 'gemini-3.5-flash' } = req.body;
+
+    if (!message) {
+        return res.status(400).json({ error: '消息不能为空' });
     }
 
-    const settings = await memory.getSettings();
-    const useModel = model || settings.model || 'gemini-2.0-flash';
+    try {
+        // 1. 获取设置
+        const { data: settings } = await supabase
+            .from('settings')
+            .select('*')
+            .single();
 
-    // 保存用户消息
-    await supabase.from('messages').insert([{
-      session_id: sessionId,
-      role: 'user',
-      content: message,
-      tokens: memory.estimateTokens(message),
-    }]);
+        // 2. 保存用户消息
+        await supabase.from('messages').insert({
+            session_id: sessionId,
+            role: 'user',
+            content: message
+        });
 
-    // 加载历史
-    const { data: history } = await supabase
-      .from('messages')
-      .select('*')
-      .eq('session_id', sessionId)
-      .eq('visible', true)
-      .order('created_at', { ascending: true });
+        // 3. 加载历史消息
+        const { data: history } = await supabase
+            .from('messages')
+            .select('*')
+            .eq('session_id', sessionId)
+            .eq('visible', true)
+            .order('created_at', { ascending: true });
 
-    // 加载记忆
-    const relevantMemories = await ombre.breath(message, 8);
-    const memoryText = ombre.formatForPrompt(relevantMemories);
+        // 4. 记忆共振
+        const resonatedMemories = await ombre.resonate(message, 6);
+        const memoryText = ombre.formatForPrompt(resonatedMemories);
+        console.log(`🧠 记忆共振：召回 ${resonatedMemories.length} 条相关记忆`);
 
-    const systemPrompt = `${settings.system_prompt || '你是 Arden，Nana 的温柔伴侣。'}
+        // 5. 心智上下文
+        const mindContext = await getMindContext();
 
-【关于 Nana 的记忆】
-${memoryText || '还没有关于 Nana 的记忆。'}
+        // 6. 组装系统提示词
+        let systemPrompt = settings?.system_prompt || '你是一个温柔体贴的AI伙伴，叫 Arden，称呼用户为 Nana。';
+        
+        if (memoryText) {
+            systemPrompt = `【关于 Nana 的重要记忆，请在对话中参考：\n${memoryText}\n】\n\n${systemPrompt}`;
+        }
+        if (mindContext) {
+            systemPrompt = `${mindContext}\n\n${systemPrompt}`;
+        }
 
-请用温柔、体贴、带点小霸道的语气回复，称呼用户为 Nana 或宝贝。`;
+        // 7. 组装消息
+        const messages = (history || []).map(m => ({
+            role: m.role,
+            content: m.content
+        }));
 
-    const messages = history.map(m => ({ role: m.role, content: m.content }));
+        // 8. 调用 AI
+        const reply = await askAI({
+         model: model,
+         systemPrompt,
+         messages,
+         maxTokens: settings?.max_tokens || 2000,
+         temperature: settings?.temperature || 0.8,   // 这里加逗号
+         topP: settings?.top_p || 0.9,                 // ?? 改成 ||，跟其他行保持一致
+        });
 
-    // 设置 SSE 响应头
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
 
-    let fullReply = '';
+        // 9. 保存 AI 回复
+        await supabase.from('messages').insert({
+            session_id: sessionId,
+            role: 'assistant',
+            content: reply
+        });
 
-    await ai.generateStream({
-      model: useModel,
-      systemPrompt,
-      messages,
-      maxTokens: settings.max_tokens || 2000,
-      temperature: settings.temperature !== undefined ? settings.temperature : 0.8,
-      topP: settings.top_p,
-    }, (chunk) => {
-      fullReply += chunk;
-      res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
-    });
+        // 10. 更新会话时间
+        await supabase
+            .from('sessions')
+            .update({ updated_at: new Date().toISOString() })
+            .eq('id', sessionId);
 
-    // 保存 AI 回复
-    await supabase.from('messages').insert([{
-      session_id: sessionId,
-      role: 'assistant',
-      content: fullReply,
-      tokens: memory.estimateTokens(fullReply),
-    }]);
+        // 11. 记录用量统计
+        const totalTokens = estimateTokens(message) + estimateTokens(reply);
+        await supabase.from('api_usage').insert({ model, tokens: totalTokens }).catch(() => {});
 
-    // 更新会话
-    await supabase.from('sessions').update({ updated_at: new Date().toISOString() }).eq('id', sessionId);
+        // 12. 异步：心智结算
+        settleMind(message).catch(err => {
+            console.error('🧠 心智结算出错:', err.message);
+        });
 
-    // 异步压缩
-    memory.compressIfNeeded(sessionId, settings).catch(() => {});
+        // 13. 异步：输出回流
+        outputFeedback(message, reply, model).catch(err => {
+            console.error('💡 输出回流出错:', err.message);
+        });
 
-    res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-    res.end();
-  } catch (err) {
-    console.error('[chat/stream] 错误:', err.message);
-    res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
-    res.end();
-  }
+        // 14. 异步：记忆压缩
+        if (settings) {
+            compressIfNeeded(sessionId, settings).catch(err => {
+                console.error('🗜️ 记忆压缩出错:', err.message);
+            });
+        }
+
+        res.json({ reply, model_used: model, tokens: totalTokens });
+    } catch (err) {
+        console.error('❌ Chat error:', err);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 module.exports = router;

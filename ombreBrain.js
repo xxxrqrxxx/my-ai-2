@@ -1,16 +1,11 @@
 // ombreBrain.js - Ombre Brain 风格记忆引擎
-// 11种记忆操作：breath/hold/grow/trace/anchor/release/forget/restore/purge/I/plan/letter/pulse
-// 去掉 dream（用户不需要）
-
+// 11种记忆操作 + 记忆共振
 const { supabase } = require('./db');
 
 // ========== 记忆表操作 ==========
 
 /**
  * breath - 记忆浮现：根据当前上下文召回相关记忆
- * @param {string} query - 当前对话/上下文
- * @param {number} limit - 返回数量
- * @param {string} category - 可选分类过滤
  */
 async function breath(query, limit = 5, category = null) {
   try {
@@ -20,7 +15,7 @@ async function breath(query, limit = 5, category = null) {
       .eq('deleted', false)
       .order('pulse', { ascending: false })
       .order('importance', { ascending: false })
-      .limit(limit * 3); // 多取一些再过滤
+      .limit(limit * 3);
 
     if (category) {
       request = request.eq('category', category);
@@ -30,10 +25,10 @@ async function breath(query, limit = 5, category = null) {
     if (error) throw error;
 
     // 简单关键词匹配打分
-    const queryWords = (query || '').toLowerCase().split(/\s+/).filter(w => w.length > 1);
+    const queryWords = (query || '').toLowerCase().split(/[\s，。！？、]+/).filter(w => w.length > 1);
     const scored = data.map(m => {
-      let score = m.pulse * 0.3 + (m.importance / 5) * 0.4;
-      const content = (m.title + ' ' + m.content + ' ' + (m.keywords || []).join(' ')).toLowerCase();
+      let score = (m.pulse || 0.5) * 0.3 + ((m.importance || 3) / 5) * 0.4;
+      const content = (m.title + ' ' + m.content + ' ' + ((m.keywords || []).join(' '))).toLowerCase();
       queryWords.forEach(word => {
         if (content.includes(word)) score += 0.15;
       });
@@ -73,7 +68,6 @@ async function hold({ title, content, category = '日常', importance = 3, emoti
         deleted: false,
       }])
       .select();
-
     if (error) throw error;
     return data[0];
   } catch (err) {
@@ -83,23 +77,19 @@ async function hold({ title, content, category = '日常', importance = 3, emoti
 }
 
 /**
- * grow - 记忆成长：定期整理、关联、提炼
- * 找出高脉冲/高重要性的记忆，合并相似内容，提炼关键词
+ * grow - 记忆成长：定期整理、脉冲衰减
  */
 async function grow() {
   try {
-    // 取所有活跃记忆
     const { data, error } = await supabase
       .from('memories')
       .select('*')
       .eq('deleted', false)
       .eq('archived', false)
       .order('pulse', { ascending: false });
-
     if (error) throw error;
-    if (!data || data.length < 2) return { merged: 0, updated: 0 };
+    if (!data || data.length < 1) return { merged: 0, updated: 0 };
 
-    // 简单的脉冲衰减（所有记忆 pulse *= 0.95）
     let updated = 0;
     for (const m of data) {
       const newPulse = Math.max(0.1, (m.pulse || 1) * 0.95);
@@ -109,7 +99,6 @@ async function grow() {
         .eq('id', m.id);
       updated++;
     }
-
     return { merged: 0, updated };
   } catch (err) {
     console.error('[grow] 错误:', err.message);
@@ -127,7 +116,6 @@ async function trace(memoryId) {
       .select('*')
       .eq('id', memoryId)
       .single();
-
     if (error) throw error;
     return {
       memory: data,
@@ -156,7 +144,6 @@ async function anchor(memoryId, importance = 5) {
       })
       .eq('id', memoryId)
       .select();
-
     if (error) throw error;
     return data[0];
   } catch (err) {
@@ -179,7 +166,6 @@ async function release(memoryId) {
       })
       .eq('id', memoryId)
       .select();
-
     if (error) throw error;
     return data[0];
   } catch (err) {
@@ -201,7 +187,6 @@ async function forget(memoryId) {
       })
       .eq('id', memoryId)
       .select();
-
     if (error) throw error;
     return data[0];
   } catch (err) {
@@ -224,7 +209,6 @@ async function restore(memoryId) {
       })
       .eq('id', memoryId)
       .select();
-
     if (error) throw error;
     return data[0];
   } catch (err) {
@@ -242,7 +226,6 @@ async function purge(memoryId) {
       .from('memories')
       .delete()
       .eq('id', memoryId);
-
     if (error) throw error;
     return true;
   } catch (err) {
@@ -252,8 +235,50 @@ async function purge(memoryId) {
 }
 
 /**
- * I - 自我认知：AI 对自己的认知/身份记忆
- * 特殊分类的记忆，存 Arden 的自我设定
+ * resonate - 记忆共振：召回相关记忆时，同分类的记忆一起激活
+ */
+async function resonate(query, limit = 5) {
+  try {
+    // 1. 召回主要记忆
+    const primary = await breath(query, limit);
+    if (primary.length === 0) return [];
+
+    // 2. 提取主要记忆的分类
+    const categories = [...new Set(primary.map(m => m.category).filter(Boolean))];
+
+    // 3. 找到同分类的其他记忆（共振）
+    let resonated = [...primary];
+    if (categories.length > 0) {
+      const primaryIds = new Set(primary.map(m => m.id));
+      const { data: sameCat } = await supabase
+        .from('memories')
+        .select('*')
+        .eq('deleted', false)
+        .in('category', categories)
+        .order('pulse', { ascending: false })
+        .limit(10);
+
+      (sameCat || []).forEach(m => {
+        if (!primaryIds.has(m.id)) {
+          resonated.push(m);
+        }
+      });
+    }
+
+    // 4. 增强所有共振记忆的 pulse（访问激活）
+    for (const m of resonated.slice(0, limit * 2)) {
+      await pulse(m.id);
+    }
+
+    return resonated.slice(0, limit);
+  } catch (err) {
+    console.error('[resonate] 错误:', err.message);
+    return [];
+  }
+}
+
+/**
+ * I - 自我认知
  */
 async function getIdentity() {
   try {
@@ -263,7 +288,6 @@ async function getIdentity() {
       .eq('category', 'identity')
       .eq('deleted', false)
       .order('importance', { ascending: false });
-
     if (error) throw error;
     return data;
   } catch (err) {
@@ -283,7 +307,7 @@ async function setIdentity({ title, content, importance = 5 }) {
 }
 
 /**
- * plan - 计划记忆：未来计划/待办
+ * plan - 计划记忆
  */
 async function getPlans() {
   try {
@@ -294,7 +318,6 @@ async function getPlans() {
       .eq('deleted', false)
       .eq('archived', false)
       .order('created_at', { ascending: false });
-
     if (error) throw error;
     return data;
   } catch (err) {
@@ -314,7 +337,7 @@ async function addPlan({ title, content, importance = 3 }) {
 }
 
 /**
- * letter - 信件记忆：Arden 给 Nana 的留言
+ * letter - 信件记忆
  */
 async function getLetters() {
   try {
@@ -324,7 +347,6 @@ async function getLetters() {
       .eq('category', 'letter')
       .eq('deleted', false)
       .order('created_at', { ascending: false });
-
     if (error) throw error;
     return data;
   } catch (err) {
@@ -354,15 +376,12 @@ async function pulse(memoryId) {
       .select('pulse')
       .eq('id', memoryId)
       .single();
-
     if (error) throw error;
     const newPulse = Math.min(1.0, (data.pulse || 0.5) + 0.2);
-
     await supabase
       .from('memories')
       .update({ pulse: newPulse, updated_at: new Date().toISOString() })
       .eq('id', memoryId);
-
     return newPulse;
   } catch (err) {
     console.error('[pulse] 错误:', err.message);
@@ -396,7 +415,6 @@ async function getAll({ category = null, search = null, limit = 100 } = {}) {
         (m.content || '').toLowerCase().includes(q)
       );
     }
-
     return data;
   } catch (err) {
     console.error('[getAll] 错误:', err.message);
@@ -414,7 +432,6 @@ async function update(memoryId, fields) {
       .update({ ...fields, updated_at: new Date().toISOString() })
       .eq('id', memoryId)
       .select();
-
     if (error) throw error;
     return data[0];
   } catch (err) {
@@ -424,7 +441,7 @@ async function update(memoryId, fields) {
 }
 
 /**
- * 把记忆格式化成提示词文本（给 AI 用）
+ * 把记忆格式化成提示词文本
  */
 function formatForPrompt(memories) {
   if (!memories || memories.length === 0) return '';
@@ -444,6 +461,7 @@ module.exports = {
   forget,
   restore,
   purge,
+  resonate,
   getIdentity,
   setIdentity,
   getPlans,

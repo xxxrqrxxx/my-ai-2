@@ -27,6 +27,8 @@ app.use('/api/memories', require('./routes/memories'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/activity', require('./routes/activity'));
 app.use('/api/mind', require('./routes/mind'));
+app.use('/api/usage', require('./routes/usage'));
+
 
 // 错误处理
 app.use((err, req, res, next) => {
