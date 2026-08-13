@@ -28,6 +28,7 @@ app.use('/api/settings', require('./routes/settings'));
 app.use('/api/activity', require('./routes/activity'));
 app.use('/api/mind', require('./routes/mind'));
 app.use('/api/usage', require('./routes/usage'));
+app.use('/api/mcp', require('./routes/mcp'));
 
 
 // 错误处理
