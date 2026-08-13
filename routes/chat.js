@@ -194,7 +194,9 @@ router.post('/', async (req, res) => {
 
         // 11. 记录用量统计
         const totalTokens = estimateTokens(message) + estimateTokens(reply);
-        await supabase.from('api_usage').insert({ model, tokens: totalTokens }).catch(() => {});
+        try {
+          await supabase.from('api_usage').insert({ model, tokens: totalTokens });
+        } catch (e) {}
 
         // 12. 异步：心智结算
         settleMind(message).catch(err => {
