@@ -133,7 +133,8 @@ router.post('/', async (req, res) => {
         await supabase.from('messages').insert({
             session_id: sessionId,
             role: 'user',
-            content: message
+            content: message,
+            file_data: req.body.file_data || null
         });
 
         // 3. 加载历史消息
