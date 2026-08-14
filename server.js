@@ -20,6 +20,10 @@ const app = express();
 
 const PORT = process.env.PORT || 3000;
 
+const whisperRoutes = require('./routes/whispers');
+const letterRoutes = require('./routes/letters');
+
+
 
 // 中间件
 
@@ -65,6 +69,11 @@ app.use('/api/mcp', require('./routes/mcp'));
 app.use('/api/push', pushRoutes);
 
 app.use('/api/activity', activityRoutes);
+
+app.use('/api/whispers', whisperRoutes);
+
+app.use('/api/letters', letterRoutes);
+
 
 
 
