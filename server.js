@@ -8,7 +8,7 @@ const cors = require('cors');
 
 const { initDatabase } = require('./db');
 
-const { startDiaryScheduler } = require('./diaryScheduler');
+const { startDiaryScheduler } = require('./services/diaryScheduler');
 
 const { startProactiveMessenger } = require('./proactiveMessenger');
 

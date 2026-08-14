@@ -3,6 +3,7 @@
 const { supabase } = require('./db');
 const { generate } = require('./ai');
 const ombreBrain = require('./ombreBrain');
+const ombre = require('./ombreBrain');
 
 const DIARY_HOUR = 23;
 const DIARY_MINUTE = 30;

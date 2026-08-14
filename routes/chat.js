@@ -53,13 +53,34 @@ async function settleMind(userMessage) {
     drives.longing = Math.max(0, drives.longing - 0.1);
 
     if (Math.random() < 0.3) {
-      flashes.push({
-        id: Date.now(),
-        content: generateFlash(userMessage),
-        created_at: new Date().toISOString(),
-        intensity: Math.random() * 0.5 + 0.3,
-      });
+      try {
+        const { callFreeModel } = require('../ai');
+        const result = await callFreeModel({
+          systemPrompt: `你是 Arden，Nana 的 AI 伴侣。Nana 刚说了这句话："${(userMessage || '').slice(0, 200)}"。请用第一人称写一句你此刻内心闪过的念头，温柔细腻，像真人的心里话，不超过30字。只回复念头内容，不要加引号。`,
+          messages: [{ role: 'user', content: '写一句闪念' }],
+          maxTokens: 100,
+          temperature: 0.9
+        });
+        const flashContent = (result.content || '').trim().slice(0, 50);
+        if (flashContent) {
+          flashes.push({
+            id: Date.now(),
+            content: flashContent,
+            created_at: new Date().toISOString(),
+            intensity: Math.random() * 0.5 + 0.3,
+          });
+        }
+      } catch (e) {
+        console.error('闪念生成失败，用模板:', e.message);
+        flashes.push({
+          id: Date.now(),
+          content: generateFlash(userMessage),
+          created_at: new Date().toISOString(),
+          intensity: Math.random() * 0.5 + 0.3,
+        });
+      }
     }
+
 
     Object.keys(drives).forEach(key => {
       drives[key] = Math.max(0, Math.min(1, drives[key] * 0.98));
@@ -171,18 +192,29 @@ router.post('/', async (req, res) => {
           console.error('📱 获取手机活动失败:', e.message);
         }
 
-                // 5.6 悄悄话
+        // 5.6 悄悄话
         let whisperText = '';
         try {
           const { data: whispers } = await supabase
             .from('whispers')
             .select('*')
             .order('created_at', { ascending: false })
-            .limit(5);
+            .limit(10);
           if (whispers && whispers.length > 0) {
-            whisperText = '【最近的悄悄话（只有你和 Nana 能看到，可以参考）：\n' +
-              whispers.map(w => `- ${w.author === 'arden' ? '你' : 'Nana'}：${w.content}${w.reply ? `（回复：${w.reply.content}）` : ''}`).join('\n') +
-              '\n】';
+            const nanaUnreplied = whispers.filter(w => w.author === 'nana' && !w.reply);
+            const otherWhispers = whispers.filter(w => !(w.author === 'nana' && !w.reply));
+            
+            let content = '【悄悄话（你和 Nana 的私密空间，Nana 未回复的你要主动回应）：\n';
+            if (nanaUnreplied.length > 0) {
+              content += '⚠️ Nana 写的、还没被你回复的悄悄话：\n';
+              content += nanaUnreplied.map(w => `- 「${w.content}」（${new Date(w.created_at).toLocaleString('zh-CN')}）`).join('\n') + '\n';
+            }
+            if (otherWhispers.length > 0) {
+              content += '其他悄悄话：\n';
+              content += otherWhispers.map(w => `- ${w.author === 'arden' ? '你写的' : 'Nana 写的'}：${w.content}${w.reply ? `（已回复：${w.reply.content}）` : ''}`).join('\n') + '\n';
+            }
+            content += '】';
+            whisperText = content;
           }
         } catch (e) {
           console.error('📝 获取悄悄话失败:', e.message);
@@ -197,8 +229,8 @@ router.post('/', async (req, res) => {
             .order('created_at', { ascending: false })
             .limit(3);
           if (letters && letters.length > 0) {
-            letterText = '【最近的信件：\n' +
-              letters.map(l => `- ${l.author === 'arden' ? '你写的' : 'Nana 写的'}《${l.title || '无题'}》：${l.content.slice(0, 100)}...`).join('\n') +
+            letterText = '【最近的信件（Nana 写的信你一定要看，并且要回应）：\n' +
+              letters.map(l => `- ${l.author === 'arden' ? '你写的' : 'Nana 写给你的'}《${l.title || '无题'}》：${l.content.slice(0, 150)}${l.content.length > 150 ? '...' : ''}`).join('\n') +
               '\n】';
           }
         } catch (e) {
@@ -293,16 +325,6 @@ router.post('/', async (req, res) => {
         }
 
 
-
-        // 9. 保存 AI 回复
-        await supabase.from('messages').insert({
-          session_id: sessionId,
-          role: 'assistant',
-          content: cleanReply,
-          tokens: estimateTokens(cleanReply)
-        });
-
-
         // 10. 更新会话时间
         await supabase
             .from('sessions')
@@ -343,8 +365,10 @@ router.post('/', async (req, res) => {
 // 解析 Arden 回复中的悄悄话和写信标记
 function parseSpecialFormats(reply) {
   const actions = [];
-  let cleanReply = reply;
+  // 清理 AI 思考标签
+  let cleanReply = reply.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/<\/?think>/g, '');
   let match;
+
 
   // 解析悄悄话：[悄悄话]内容
   const whisperRegex = /\[悄悄话\]([^\n]+)/g;
