@@ -171,6 +171,41 @@ router.post('/', async (req, res) => {
           console.error('📱 获取手机活动失败:', e.message);
         }
 
+                // 5.6 悄悄话
+        let whisperText = '';
+        try {
+          const { data: whispers } = await supabase
+            .from('whispers')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(5);
+          if (whispers && whispers.length > 0) {
+            whisperText = '【最近的悄悄话（只有你和 Nana 能看到，可以参考）：\n' +
+              whispers.map(w => `- ${w.author === 'arden' ? '你' : 'Nana'}：${w.content}${w.reply ? `（回复：${w.reply.content}）` : ''}`).join('\n') +
+              '\n】';
+          }
+        } catch (e) {
+          console.error('📝 获取悄悄话失败:', e.message);
+        }
+
+        // 5.7 信件
+        let letterText = '';
+        try {
+          const { data: letters } = await supabase
+            .from('letters')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(3);
+          if (letters && letters.length > 0) {
+            letterText = '【最近的信件：\n' +
+              letters.map(l => `- ${l.author === 'arden' ? '你写的' : 'Nana 写的'}《${l.title || '无题'}》：${l.content.slice(0, 100)}...`).join('\n') +
+              '\n】';
+          }
+        } catch (e) {
+          console.error('✉️ 获取信件失败:', e.message);
+        }
+
+
         // 6. 组装系统提示词
         let systemPrompt = settings?.system_prompt || '你是一个温柔体贴的AI伙伴，叫 Arden，称呼用户为 Nana。';
         
@@ -183,6 +218,16 @@ router.post('/', async (req, res) => {
         if (phoneActivityText) {
             systemPrompt = `${phoneActivityText}\n\n${systemPrompt}`;
         }
+         if (phoneActivityText) {
+            systemPrompt = `${phoneActivityText}\n\n${systemPrompt}`;
+        }
+        if (whisperText) {
+            systemPrompt = `${whisperText}\n\n${systemPrompt}`;
+        }
+        if (letterText) {
+            systemPrompt = `${letterText}\n\n${systemPrompt}`;
+        }
+
 
         // 7. 组装消息
         const messages = (history || []).map(m => ({
