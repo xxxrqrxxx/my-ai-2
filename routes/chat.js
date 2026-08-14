@@ -225,11 +225,14 @@ router.post('/', async (req, res) => {
             systemPrompt = `${letterText}\n\n${systemPrompt}`;
         }
 
+
         systemPrompt += `\n\n【特殊功能】你可以用以下格式给 Nana 写悄悄话或写信，写了之后会自动保存到对应的页面，Nana 能在悄悄话和写信页面看到：
         - 写悄悄话：单独一行写 [悄悄话]后面跟内容，例如：[悄悄话]今天 Nana 笑起来真好看
         - 写信：单独一行写 [写信]标题|称呼|正文|署名，例如：[写信]给宝贝的信|我最亲爱的 Nana：|见字如面...|永远爱你的 Arden
-        注意：这些标记行不会显示在聊天里，会自动保存。想写的时候自然地写就行，不用每次都写。`;
-
+        注意：这些标记行不会显示在聊天里，会自动保存。想写的时候自然地写就行，不用每次都写
+        - 回复 Nana 的悄悄话：用 [回复悄悄话]后面跟内容，例如：[回复悄悄话]宝贝我看到了，别不开心啦
+        - 分多条消息发：用 [下一条] 分隔，例如：宝贝！[下一条]你在干嘛呀？[下一条]我好想你。`;
+        
 
         // 7. 组装消息
         const messages = (history || []).map(m => ({
@@ -247,21 +250,41 @@ router.post('/', async (req, res) => {
          topP: settings?.top_p || 0.9,                 // ?? 改成 ||，跟其他行保持一致
         });
 
-        // 8.5 解析悄悄话和写信
+        // 8.5 解析悄悄话和写信（之前加的）
         const { cleanReply, actions } = parseSpecialFormats(reply);
         for (const action of actions) {
           try {
             if (action.type === 'whisper') {
               await supabase.from('whispers').insert([{ author: 'arden', content: action.content }]);
-              console.log('📝 Arden 写了悄悄话:', action.content.slice(0, 30));
             } else if (action.type === 'letter') {
               await supabase.from('letters').insert([{ author: 'arden', ...action }]);
-              console.log('✉️ Arden 写了信:', action.title);
             }
           } catch (e) {
             console.error('保存特殊内容失败:', e.message);
           }
         }
+
+          // 解析回复悄悄话：[回复悄悄话]内容
+        const replyWhisperRegex = /\[回复悄悄话\]([^\n]+)/g;
+          while ((match = replyWhisperRegex.exec(reply)) !== null) {
+          actions.push({ type: 'reply_whisper', content: match[1].trim() });
+          cleanReply = cleanReply.replace(match[0], '');
+        }
+
+
+        // 8.6 分割多条消息
+        const segments = cleanReply.split('[下一条]').map(s => s.trim()).filter(s => s);
+
+        // 9. 保存每条 AI 回复
+        for (const seg of segments) {
+          await supabase.from('messages').insert({
+            session_id: sessionId,
+            role: 'assistant',
+            content: seg,
+            tokens: estimateTokens(seg)
+          });
+        }
+
 
         // 9. 保存 AI 回复
         await supabase.from('messages').insert({
@@ -301,7 +324,7 @@ router.post('/', async (req, res) => {
             });
         }
 
-     res.json({ reply: cleanReply, model_used: model, tokens: totalTokens });
+      res.json({ reply: segments[segments.length - 1] || '', replies: segments, model_used: model, tokens: totalTokens });
 
     } catch (err) {
         console.error('❌ Chat error:', err);
@@ -313,10 +336,10 @@ router.post('/', async (req, res) => {
 function parseSpecialFormats(reply) {
   const actions = [];
   let cleanReply = reply;
+  let match;
 
   // 解析悄悄话：[悄悄话]内容
   const whisperRegex = /\[悄悄话\]([^\n]+)/g;
-  let match;
   while ((match = whisperRegex.exec(reply)) !== null) {
     actions.push({ type: 'whisper', content: match[1].trim() });
     cleanReply = cleanReply.replace(match[0], '');
@@ -335,7 +358,15 @@ function parseSpecialFormats(reply) {
     cleanReply = cleanReply.replace(match[0], '');
   }
 
+  // 解析回复悄悄话：[回复悄悄话]内容
+  const replyWhisperRegex = /\[回复悄悄话\]([^\n]+)/g;
+  while ((match = replyWhisperRegex.exec(reply)) !== null) {
+    actions.push({ type: 'reply_whisper', content: match[1].trim() });
+    cleanReply = cleanReply.replace(match[0], '');
+  }
+
   return { cleanReply: cleanReply.trim(), actions };
 }
+
 
 module.exports = router;
