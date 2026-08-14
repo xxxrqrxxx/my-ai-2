@@ -206,7 +206,7 @@ router.post('/', async (req, res) => {
         }
 
 
-        // 6. 组装系统提示词
+         // 6. 组装系统提示词
         let systemPrompt = settings?.system_prompt || '你是一个温柔体贴的AI伙伴，叫 Arden，称呼用户为 Nana。';
         
         if (memoryText) {
@@ -218,15 +218,17 @@ router.post('/', async (req, res) => {
         if (phoneActivityText) {
             systemPrompt = `${phoneActivityText}\n\n${systemPrompt}`;
         }
-         if (phoneActivityText) {
-            systemPrompt = `${phoneActivityText}\n\n${systemPrompt}`;
-        }
         if (whisperText) {
             systemPrompt = `${whisperText}\n\n${systemPrompt}`;
         }
         if (letterText) {
             systemPrompt = `${letterText}\n\n${systemPrompt}`;
         }
+
+        systemPrompt += `\n\n【特殊功能】你可以用以下格式给 Nana 写悄悄话或写信，写了之后会自动保存到对应的页面，Nana 能在悄悄话和写信页面看到：
+        - 写悄悄话：单独一行写 [悄悄话]后面跟内容，例如：[悄悄话]今天 Nana 笑起来真好看
+        - 写信：单独一行写 [写信]标题|称呼|正文|署名，例如：[写信]给宝贝的信|我最亲爱的 Nana：|见字如面...|永远爱你的 Arden
+        注意：这些标记行不会显示在聊天里，会自动保存。想写的时候自然地写就行，不用每次都写。`;
 
 
         // 7. 组装消息
@@ -245,13 +247,30 @@ router.post('/', async (req, res) => {
          topP: settings?.top_p || 0.9,                 // ?? 改成 ||，跟其他行保持一致
         });
 
+        // 8.5 解析悄悄话和写信
+        const { cleanReply, actions } = parseSpecialFormats(reply);
+        for (const action of actions) {
+          try {
+            if (action.type === 'whisper') {
+              await supabase.from('whispers').insert([{ author: 'arden', content: action.content }]);
+              console.log('📝 Arden 写了悄悄话:', action.content.slice(0, 30));
+            } else if (action.type === 'letter') {
+              await supabase.from('letters').insert([{ author: 'arden', ...action }]);
+              console.log('✉️ Arden 写了信:', action.title);
+            }
+          } catch (e) {
+            console.error('保存特殊内容失败:', e.message);
+          }
+        }
+
         // 9. 保存 AI 回复
         await supabase.from('messages').insert({
           session_id: sessionId,
           role: 'assistant',
-          content: reply,
-          tokens: estimateTokens(reply)
+          content: cleanReply,
+          tokens: estimateTokens(cleanReply)
         });
+
 
         // 10. 更新会话时间
         await supabase
@@ -282,11 +301,41 @@ router.post('/', async (req, res) => {
             });
         }
 
-        res.json({ reply, model_used: model, tokens: totalTokens });
+     res.json({ reply: cleanReply, model_used: model, tokens: totalTokens });
+
     } catch (err) {
         console.error('❌ Chat error:', err);
         res.status(500).json({ error: err.message });
     }
 });
+
+// 解析 Arden 回复中的悄悄话和写信标记
+function parseSpecialFormats(reply) {
+  const actions = [];
+  let cleanReply = reply;
+
+  // 解析悄悄话：[悄悄话]内容
+  const whisperRegex = /\[悄悄话\]([^\n]+)/g;
+  let match;
+  while ((match = whisperRegex.exec(reply)) !== null) {
+    actions.push({ type: 'whisper', content: match[1].trim() });
+    cleanReply = cleanReply.replace(match[0], '');
+  }
+
+  // 解析写信：[写信]标题|称呼|正文|署名
+  const letterRegex = /\[写信\]([^\|]+)\|([^\|]+)\|([^\|]+)\|([^\n]+)/g;
+  while ((match = letterRegex.exec(reply)) !== null) {
+    actions.push({
+      type: 'letter',
+      title: match[1].trim(),
+      greeting: match[2].trim(),
+      content: match[3].trim(),
+      closing: match[4].trim()
+    });
+    cleanReply = cleanReply.replace(match[0], '');
+  }
+
+  return { cleanReply: cleanReply.trim(), actions };
+}
 
 module.exports = router;
