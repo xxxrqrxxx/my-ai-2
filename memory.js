@@ -1,7 +1,7 @@
 // backend/memory.js
-// 记忆压缩模块 - 集成 Ombre Brain
+// 记忆压缩模块 - 集成 Ombre Brain + 免费模型池
 const { supabase } = require('./db');
-const { askAI } = require('./ai');
+const { callFreeModel } = require('./ai');
 const ombre = require('./ombreBrain');
 
 /**
@@ -13,13 +13,23 @@ function estimateTokens(text) {
 }
 
 /**
+ * 记录用量统计
+ */
+async function recordUsage(model, tokens) {
+  try {
+    await supabase.from('api_usage').insert({ model, tokens });
+  } catch (e) {
+    // 静默失败，不影响主流程
+  }
+}
+
+/**
  * 加载所有记忆，拼接成一段文本（给 AI 提示词用）
  */
 async function loadMemory(query = null, limit = 8) {
   try {
     let memories;
     if (query) {
-      // 有查询词时，用 breath 召回相关记忆
       memories = await ombre.breath(query, limit);
     } else {
       memories = await ombre.getAll({ limit });
@@ -33,7 +43,7 @@ async function loadMemory(query = null, limit = 8) {
 }
 
 /**
- * 检查是否需要压缩，如果需要就执行压缩
+ * 检查是否需要压缩，如果需要就执行压缩（走免费模型池）
  */
 async function compressIfNeeded(sessionId, settings) {
   try {
@@ -44,6 +54,7 @@ async function compressIfNeeded(sessionId, settings) {
       .eq('session_id', sessionId)
       .eq('visible', true)
       .order('created_at', { ascending: true });
+
     if (msgError) {
       console.error('❌ 获取消息失败:', msgError.message);
       return;
@@ -61,7 +72,7 @@ async function compressIfNeeded(sessionId, settings) {
     }
 
     // 3. 计算要保留的最近 N 轮
-    const keepRounds = settings.compress_keep_rounds || 6;
+    const keepRounds = settings.compress_keep_rounds || settings.keep_rounds || 6;
     const keepCount = keepRounds * 2;
     if (messages.length <= keepCount) {
       console.log('ℹ️ 消息太少，不需要压缩');
@@ -77,28 +88,30 @@ async function compressIfNeeded(sessionId, settings) {
       .map(m => `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`)
       .join('\n');
 
-    // 6. 用 AI 压缩
-    const compressModel = settings.compress_model || settings.model || 'gemini-3.5-flash';
-    const summary = await askAI({
-      model: compressModel,
+    // 6. 用免费模型池压缩
+    const compressResult = await callFreeModel({
       systemPrompt: '你是一个对话摘要助手。请将以下对话内容压缩为一段简洁的摘要，保留关键事实、情感基调和重要细节。用中文输出，不要超过300字。只输出摘要内容，不要加任何解释。',
       messages: [{ role: 'user', content: conversationText }],
       maxTokens: 500,
-      temperature: 0.3
+      temperature: 0.3,
     });
+    const summary = compressResult.content;
+    const compressModel = compressResult.model;
+    recordUsage(compressModel, estimateTokens(conversationText) + estimateTokens(summary));
 
-    // 7. 生成标题
+    // 7. 生成标题（也走免费模型池）
     let title = '对话摘要';
     try {
-      const titleResult = await askAI({
-        model: compressModel,
+      const titleResult = await callFreeModel({
         systemPrompt: '请为以下对话摘要生成一个不超过10个字的简短标题，概括核心内容。只输出标题，不要加任何标点或解释。',
         messages: [{ role: 'user', content: summary }],
         maxTokens: 50,
-        temperature: 0.3
+        temperature: 0.3,
       });
-      if (titleResult && titleResult.trim()) {
-        title = titleResult.trim().replace(/[。！？、，.]/g, '').slice(0, 15);
+      const titleText = titleResult.content;
+      recordUsage(titleResult.model, estimateTokens(summary) + estimateTokens(titleText));
+      if (titleText && titleText.trim()) {
+        title = titleText.trim().replace(/[。！？、，.]/g, '').slice(0, 15);
       }
     } catch (titleErr) {
       console.warn('⚠️ 生成标题失败，使用默认标题');
@@ -122,20 +135,19 @@ async function compressIfNeeded(sessionId, settings) {
       .update({ visible: false })
       .in('id', idsToHide);
 
-    console.log(`✅ 压缩完成！生成记忆: "${title}"，隐藏了 ${idsToHide.length} 条旧消息`);
+    console.log(`✅ 压缩完成！生成记忆: "${title}"，隐藏了 ${idsToHide.length} 条旧消息，模型: ${compressModel}`);
   } catch (err) {
     console.error('❌ 记忆压缩失败:', err.message);
   }
 }
 
 /**
- * 输出回流：分析 AI 回复，提取关于用户的新信息，自动保存为记忆
+ * 输出回流：分析 AI 回复，提取关于用户的新信息，自动保存为记忆（走免费模型池）
  */
 async function outputFeedback(userMessage, aiReply, model) {
   try {
-    // 用 AI 分析回复中是否有关于用户的新信息
-    const analysis = await askAI({
-      model: model || 'gemini-3.5-flash',
+    // 用免费模型池分析
+    const analysisResult = await callFreeModel({
       systemPrompt: `你是一个记忆提取助手。请分析以下对话，判断 AI 的回复中是否透露了关于用户的新事实、偏好或重要信息。
 如果有，请提取为一条简短的记忆，格式为：标题|内容|分类（日常/偏好/情感/重要）
 如果没有新信息，只回复 "无"。
@@ -144,8 +156,10 @@ async function outputFeedback(userMessage, aiReply, model) {
         { role: 'user', content: `用户说：${userMessage}\nAI回复：${aiReply}` }
       ],
       maxTokens: 200,
-      temperature: 0.2
+      temperature: 0.2,
     });
+    const analysis = analysisResult.content;
+    recordUsage(analysisResult.model, estimateTokens(userMessage) + estimateTokens(aiReply) + estimateTokens(analysis));
 
     if (!analysis || analysis.trim() === '无' || analysis.includes('无')) {
       return null;
@@ -161,10 +175,10 @@ async function outputFeedback(userMessage, aiReply, model) {
         category,
         importance: 3,
         source: 'auto',
-        model_used: model,
+        model_used: analysisResult.model,
         trace: 'output_feedback',
       });
-      console.log(`💡 输出回流：提取新记忆 "${title}"`);
+      console.log(`💡 输出回流：提取新记忆 "${title}"，模型: ${analysisResult.model}`);
       return memory;
     }
     return null;

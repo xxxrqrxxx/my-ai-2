@@ -96,6 +96,16 @@ INSERT INTO settings (id, system_prompt)
 VALUES (1, '你是 Arden，Nana 的温柔伴侣。')
 ON CONFLICT (id) DO NOTHING;
 
+-- 用量统计表
+CREATE TABLE IF NOT EXISTS api_usage (
+  id BIGSERIAL PRIMARY KEY,
+  model TEXT NOT NULL,
+  tokens INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_api_usage_model ON api_usage(model);
+CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage(created_at);
+
 -- 插入默认心智状态
 INSERT INTO mind_state (id) VALUES (1)
 ON CONFLICT (id) DO NOTHING;

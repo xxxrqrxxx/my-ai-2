@@ -131,10 +131,11 @@ router.post('/', async (req, res) => {
 
         // 2. 保存用户消息
         await supabase.from('messages').insert({
-            session_id: sessionId,
-            role: 'user',
-            content: message,
-            file_data: req.body.file_data || null
+          session_id: sessionId,
+          role: 'user',
+          content: message,
+          tokens: estimateTokens(message),
+          file_data: req.body.file_data || null
         });
 
         // 3. 加载历史消息
@@ -182,9 +183,10 @@ router.post('/', async (req, res) => {
 
         // 9. 保存 AI 回复
         await supabase.from('messages').insert({
-            session_id: sessionId,
-            role: 'assistant',
-            content: reply
+          session_id: sessionId,
+          role: 'assistant',
+          content: reply,
+          tokens: estimateTokens(reply)
         });
 
         // 10. 更新会话时间
