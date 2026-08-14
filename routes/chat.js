@@ -151,8 +151,25 @@ router.post('/', async (req, res) => {
         const memoryText = ombre.formatForPrompt(resonatedMemories);
         console.log(`🧠 记忆共振：召回 ${resonatedMemories.length} 条相关记忆`);
 
-        // 5. 心智上下文
+                // 5. 心智上下文
         const mindContext = await getMindContext();
+
+        // 5.5 手机活动
+        let phoneActivityText = '';
+        try {
+          const { data: activity } = await supabase
+            .from('phone_activity')
+            .select('app_name, opened_at')
+            .order('opened_at', { ascending: false })
+            .limit(10);
+          if (activity && activity.length > 0) {
+            phoneActivityText = '【Nana 最近手机活动：\n' +
+              activity.map(a => `- ${a.app_name} (${new Date(a.opened_at).toLocaleString('zh-CN')})`).join('\n') +
+              '\n】';
+          }
+        } catch (e) {
+          console.error('📱 获取手机活动失败:', e.message);
+        }
 
         // 6. 组装系统提示词
         let systemPrompt = settings?.system_prompt || '你是一个温柔体贴的AI伙伴，叫 Arden，称呼用户为 Nana。';
@@ -162,6 +179,9 @@ router.post('/', async (req, res) => {
         }
         if (mindContext) {
             systemPrompt = `${mindContext}\n\n${systemPrompt}`;
+        }
+        if (phoneActivityText) {
+            systemPrompt = `${phoneActivityText}\n\n${systemPrompt}`;
         }
 
         // 7. 组装消息
@@ -179,7 +199,6 @@ router.post('/', async (req, res) => {
          temperature: settings?.temperature || 0.8,   // 这里加逗号
          topP: settings?.top_p || 0.9,                 // ?? 改成 ||，跟其他行保持一致
         });
-
 
         // 9. 保存 AI 回复
         await supabase.from('messages').insert({
