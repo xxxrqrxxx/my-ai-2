@@ -28,10 +28,18 @@ router.post('/report', auth, async (req, res) => {
     if (error) throw error;
     
     // 只保留最近100条
-    await supabase
+    const { data: recent } = await supabase
       .from('phone_activity')
-      .delete()
-      .where('id NOT IN (SELECT id FROM phone_activity ORDER BY opened_at DESC LIMIT 100)');
+      .select('id')
+      .order('opened_at', { ascending: false })
+      .limit(100);
+    if (recent && recent.length > 0) {
+      const keepIds = recent.map(r => r.id);
+      await supabase
+        .from('phone_activity')
+        .delete()
+        .not('id', 'in', `(${keepIds.join(',')})`);
+    }
     
     res.json({ status: 'ok' });
   } catch (err) {
