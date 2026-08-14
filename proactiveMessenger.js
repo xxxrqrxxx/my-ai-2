@@ -37,7 +37,18 @@ async function getMindState() {
 }
 
 async function getRecentPhoneActivity() {
-  return [];
+  try {
+    const { data, error } = await supabase
+      .from('phone_activity')
+      .select('*')
+      .order('opened_at', { ascending: false })
+      .limit(10);
+    if (error || !data) return [];
+    return data;
+  } catch (e) {
+    console.error('❌ [主动消息] 获取手机活动失败:', e.message);
+    return [];
+  }
 }
 
 async function shouldSendMessage(mindState, messages, phoneActivity) {

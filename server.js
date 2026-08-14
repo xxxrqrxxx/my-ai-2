@@ -14,6 +14,7 @@ const { startProactiveMessenger } = require('./proactiveMessenger');
 
 const pushRoutes = require('./routes/push');
 
+const activityRoutes = require('./routes/activity');
 
 const app = express();
 
@@ -62,6 +63,8 @@ app.use('/api/usage', require('./routes/usage'));
 app.use('/api/mcp', require('./routes/mcp'));
 
 app.use('/api/push', pushRoutes);
+
+app.use('/api/activity', activityRoutes);
 
 
 
