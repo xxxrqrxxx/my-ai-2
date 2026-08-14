@@ -250,27 +250,34 @@ router.post('/', async (req, res) => {
          topP: settings?.top_p || 0.9,                 // ?? 改成 ||，跟其他行保持一致
         });
 
-        // 8.5 解析悄悄话和写信（之前加的）
+         // 8.5 解析悄悄话、写信、回复悄悄话
         const { cleanReply, actions } = parseSpecialFormats(reply);
         for (const action of actions) {
           try {
             if (action.type === 'whisper') {
               await supabase.from('whispers').insert([{ author: 'arden', content: action.content }]);
+              console.log('📝 Arden 写了悄悄话:', action.content.slice(0, 30));
             } else if (action.type === 'letter') {
-              await supabase.from('letters').insert([{ author: 'arden', ...action }]);
+              await supabase.from('letters').insert([{ author: 'arden', title: action.title, greeting: action.greeting, content: action.content, closing: action.closing }]);
+              console.log('✉️ Arden 写了信:', action.title);
+            } else if (action.type === 'reply_whisper') {
+              const { data: nanaWhispers } = await supabase
+                .from('whispers')
+                .select('*')
+                .eq('author', 'nana')
+                .is('reply', null)
+                .order('created_at', { ascending: false })
+                .limit(1);
+              if (nanaWhispers && nanaWhispers.length > 0) {
+                const whisperReply = { author: 'arden', content: action.content, created_at: new Date().toISOString() };
+                await supabase.from('whispers').update({ reply: whisperReply }).eq('id', nanaWhispers[0].id);
+                console.log('💬 Arden 回复了悄悄话:', action.content.slice(0, 30));
+              }
             }
           } catch (e) {
             console.error('保存特殊内容失败:', e.message);
           }
         }
-
-          // 解析回复悄悄话：[回复悄悄话]内容
-        const replyWhisperRegex = /\[回复悄悄话\]([^\n]+)/g;
-          while ((match = replyWhisperRegex.exec(reply)) !== null) {
-          actions.push({ type: 'reply_whisper', content: match[1].trim() });
-          cleanReply = cleanReply.replace(match[0], '');
-        }
-
 
         // 8.6 分割多条消息
         const segments = cleanReply.split('[下一条]').map(s => s.trim()).filter(s => s);
@@ -284,6 +291,7 @@ router.post('/', async (req, res) => {
             tokens: estimateTokens(seg)
           });
         }
+
 
 
         // 9. 保存 AI 回复
@@ -302,7 +310,7 @@ router.post('/', async (req, res) => {
             .eq('id', sessionId);
 
         // 11. 记录用量统计
-        const totalTokens = estimateTokens(message) + estimateTokens(reply);
+        const totalTokens = estimateTokens(message) + segments.reduce((sum, s) => sum + estimateTokens(s), 0);
         try {
           await supabase.from('api_usage').insert({ model, tokens: totalTokens });
         } catch (e) {}
