@@ -10,6 +10,10 @@ const { initDatabase } = require('./db');
 
 const { startDiaryScheduler } = require('./diaryScheduler');
 
+const { startProactiveMessenger } = require('./proactiveMessenger');
+
+const pushRoutes = require('./routes/push');
+
 
 const app = express();
 
@@ -57,6 +61,9 @@ app.use('/api/usage', require('./routes/usage'));
 
 app.use('/api/mcp', require('./routes/mcp'));
 
+app.use('/api/push', pushRoutes);
+
+
 
 // 错误处理
 
@@ -71,6 +78,8 @@ app.use((err, req, res, next) => {
 // 启动日记定时任务（每天 23:30 自动写日记）
 
 startDiaryScheduler();
+startProactiveMessenger();
+
 
 app.listen(PORT, () => {
 
