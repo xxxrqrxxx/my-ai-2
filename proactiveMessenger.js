@@ -6,14 +6,26 @@ const CHECK_INTERVAL = 15 * 60 * 1000;
 let isRunning = false;
 
 async function getActiveSession() {
-  const { data, error } = await supabase
+  // 先从 sessions 表查
+  const { data: sessions, error } = await supabase
     .from('sessions')
     .select('id, title, updated_at')
     .order('updated_at', { ascending: false })
     .limit(1);
-  if (error || !data || data.length === 0) return null;
-  return data[0];
+  if (!error && sessions && sessions.length > 0) return sessions[0];
+  
+  // sessions 表没数据，从 messages 表查最近有消息的会话
+  const { data: messages } = await supabase
+    .from('messages')
+    .select('session_id')
+    .order('created_at', { ascending: false })
+    .limit(1);
+  if (messages && messages.length > 0) {
+    return { id: messages[0].session_id };
+  }
+  return null;
 }
+
 
 async function getRecentMessages(sessionId, limit = 10) {
   const { data, error } = await supabase
